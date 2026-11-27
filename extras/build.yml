@@ -1,0 +1,149 @@
+# .github/workflows/build.yml
+#
+# Build PRIVATO di HarkinianPad (Ship of Harkinian per iPhone/iPad) con
+# "HarkinianPad Extras": scatto, salto, capriola con invincibilita', Z-target, scia della spada, particelle,
+# mirino del lock-on migliorato. App arm64 NON firmata -> ShipOfHarkinian.ipa,
+# caricata come Artifact del repository privato.
+#
+# Sicurezza:
+#  - Solo azioni ufficiali GitHub, fissate a commit SHA immutabili.
+#  - Nessun secret, nessun certificato, permessi di sola lettura.
+#  - I sorgenti originali vengono verificati hash-per-hash (verify-sources.py)
+#    e configurati PRIMA della patch. La patch extras/harkinianpad-extras.patch
+#    viene applicata solo se il suo SHA-256 coincide con quello fissato qui
+#    sotto, solo per la compilazione, e poi rimossa: i controlli finali
+#    (provenienza, audit ROM nel pacchetto) girano sui sorgenti originali.
+#  - Nessuna ROM e nessun dato di gioco nell'IPA.
+
+name: Private iPad build (unsigned IPA + extras)
+
+on:
+  workflow_dispatch: # solo avvio manuale: i minuti macOS valgono 10x
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-ipa-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Unsigned arm64 iPhoneOS IPA
+    runs-on: macos-latest
+    timeout-minutes: 150
+
+    env:
+      DEVELOPMENT_TEAM: ""
+      IPA_NAME: ShipOfHarkinian.ipa
+      EXTRAS_PATCH: extras/harkinianpad-extras.patch
+      # Se modifichi la patch, aggiorna questo hash (shasum -a 256 del file).
+      EXTRAS_SHA256: 6c70d33743d82ccd3e70d65a8711859b77c9b9e1829d465aac7099636b3e6e7a
+
+    steps:
+      - name: Checkout (no credenziali persistenti)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+
+      - name: Controlli di sicurezza del repository
+        run: |
+          set -euo pipefail
+          scripts/check-repo-safety.sh
+          python3 -m unittest -v tests/source_verification_test.py
+
+      - name: Strumenti di build
+        run: |
+          set -euo pipefail
+          brew install cmake pkgconf libzip
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Sorgenti originali - verifica e configurazione
+        run: |
+          set -euo pipefail
+          scripts/clone-sources.sh
+          scripts/verify-sources.py
+          scripts/generate-port-archive.sh
+          scripts/configure-ios.sh --soh
+
+      - name: Applica HarkinianPad Extras (hash fissato)
+        run: |
+          set -euo pipefail
+          echo "$EXTRAS_SHA256  $EXTRAS_PATCH" | shasum -a 256 -c -
+          git -C sources/Shipwright apply --check "$GITHUB_WORKSPACE/$EXTRAS_PATCH"
+          git -C sources/Shipwright apply "$GITHUB_WORKSPACE/$EXTRAS_PATCH"
+          git -C sources/Shipwright status --short
+
+      - name: Compila app arm64 iPhoneOS non firmata
+        run: |
+          set -euo pipefail
+          PREFIX_MAP="-ffile-prefix-map=$GITHUB_WORKSPACE=."
+          rm -rf build-ios-soh/soh/Release-iphoneos/HarkinianPad.app
+          cmake --build build-ios-soh --target soh --config Release -- \
+            -destination generic/platform=iOS \
+            "OTHER_CFLAGS=\$(inherited) $PREFIX_MAP" \
+            "OTHER_CPLUSPLUSFLAGS=\$(inherited) $PREFIX_MAP" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+
+      - name: Rimuovi la patch e ricontrolla i sorgenti originali
+        if: always()
+        run: |
+          set -euo pipefail
+          if ! git -C sources/Shipwright diff --quiet; then
+            git -C sources/Shipwright apply -R "$GITHUB_WORKSPACE/$EXTRAS_PATCH"
+          fi
+          scripts/verify-sources.py
+
+      - name: Provenienza della build
+        run: |
+          set -euo pipefail
+          scripts/write-build-provenance.py build-ios-soh/soh/Release-iphoneos/HarkinianPad.app
+
+      - name: Verifica architettura e assenza di firma
+        run: |
+          set -euo pipefail
+          APP="build-ios-soh/soh/Release-iphoneos/HarkinianPad.app"
+          ARCHS="$(lipo -archs "$APP/HarkinianPad")"
+          echo "Architetture: $ARCHS"
+          [ "$ARCHS" = "arm64" ] || { echo "Attesa solo arm64" >&2; exit 1; }
+          vtool -show-build "$APP/HarkinianPad" | grep -Eq 'platform +IOS$'
+          if [ -f "$APP/embedded.mobileprovision" ]; then
+            echo "Profilo di provisioning inatteso" >&2; exit 1
+          fi
+
+      - name: Impacchetta IPA (con audit ROM/dati di gioco)
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/ipa/$IPA_NAME"
+          scripts/package-ios.sh \
+            build-ios-soh/soh/Release-iphoneos/HarkinianPad.app "$OUT"
+          cd "$RUNNER_TEMP/ipa"
+          shasum -a 256 "$IPA_NAME" > "$IPA_NAME.sha256"
+          {
+            echo "HarkinianPad Extras incluse in questa IPA"
+            echo "patch: $EXTRAS_PATCH"
+            echo "sha256: $EXTRAS_SHA256"
+            echo "commit: $GITHUB_SHA"
+          } > EXTRAS.txt
+          cat "$IPA_NAME.sha256" EXTRAS.txt
+          {
+            echo "### ShipOfHarkinian.ipa (con Extras)"
+            echo '```'
+            cat "$IPA_NAME.sha256" EXTRAS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Carica Artifact privato
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ShipOfHarkinian-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/ipa/ShipOfHarkinian.ipa
+            ${{ runner.temp }}/ipa/ShipOfHarkinian.ipa.sha256
+            ${{ runner.temp }}/ipa/EXTRAS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3

@@ -1,0 +1,722 @@
+diff --git a/soh/soh/Enhancements/QoL/ReworkedTargeting.cpp b/soh/soh/Enhancements/QoL/ReworkedTargeting.cpp
+index 72f238e6..645d57f8 100644
+--- a/soh/soh/Enhancements/QoL/ReworkedTargeting.cpp
++++ b/soh/soh/Enhancements/QoL/ReworkedTargeting.cpp
+@@ -54,3 +54,37 @@ void RegisterReworkedTargeting() {
+ }
+ 
+ static RegisterShipInitFunc initFunc(RegisterReworkedTargeting, { CVAR_REWORKED_TARGETING_NAME });
++
++// HarkinianPad extras: jump on a configurable button.
++// The movement itself lives in z_player.c (Player_HPTryManualJump), which only allows it from
++// ordinary on-ground movement.
++#include "soh/OTRGlobals.h"
++
++extern "C" {
++s32 Player_HPTryManualJump(PlayState* play, f32 jumpVelocity);
++}
++
++#define CVAR_HP_JUMP_NAME CVAR_ENHANCEMENT("HPJump.Enabled")
++#define CVAR_HP_JUMP_VALUE CVarGetInteger(CVAR_HP_JUMP_NAME, 0)
++
++static void OnPlayerUpdateHPJump() {
++    if (gPlayState == nullptr) {
++        return;
++    }
++
++    const s32 jumpMask = CVarGetInteger(CVAR_ENHANCEMENT("HPJump.Btn"), BTN_CUSTOM_MODIFIER2);
++    if (jumpMask == 0) {
++        return;
++    }
++
++    Input* input = &gPlayState->state.input[0];
++    if (CHECK_BTN_ANY(input->press.button, jumpMask)) {
++        Player_HPTryManualJump(gPlayState, CVarGetFloat(CVAR_ENHANCEMENT("HPJump.Height"), 6.5f));
++    }
++}
++
++static void RegisterHPJump() {
++    COND_HOOK(OnPlayerUpdate, CVAR_HP_JUMP_VALUE, OnPlayerUpdateHPJump);
++}
++
++static RegisterShipInitFunc hpJumpInitFunc(RegisterHPJump, { CVAR_HP_JUMP_NAME });
+diff --git a/soh/soh/Enhancements/SpeedModifiers.cpp b/soh/soh/Enhancements/SpeedModifiers.cpp
+index 4d6ab8fe..912c865c 100644
+--- a/soh/soh/Enhancements/SpeedModifiers.cpp
++++ b/soh/soh/Enhancements/SpeedModifiers.cpp
+@@ -46,6 +46,24 @@ static f32 GetSpeedModifierJumpFactor() {
+     return GetSpeedModifierFactor(true);
+ }
+ 
++// HarkinianPad extras: remake-style sprint. Keep holding the roll button (A) after a roll to keep running faster.
++#define CVAR_HP_SPRINT_NAME CVAR_ENHANCEMENT("HPSprint.Enabled")
++
++extern "C" void HP_SpawnFootDust(PlayState* play, Vec3f* pos, s32 count);
++
++static f32 HP_GetSprintFactor() {
++    if (!CVarGetInteger(CVAR_HP_SPRINT_NAME, 0) || (gPlayState == nullptr)) {
++        return 1.0f;
++    }
++
++    Input* input = &gPlayState->state.input[0];
++    if (CHECK_BTN_ALL(input->cur.button, BTN_A)) {
++        return CLAMP(CVarGetFloat(CVAR_ENHANCEMENT("HPSprint.Speed"), 1.5f), 1.0f, 2.0f);
++    }
++
++    return 1.0f;
++}
++
+ static bool ShouldAmplifyJump(Player* player) {
+     return Ship_GetBunnyHoodJumpFactor(player) != 1.0f || GetSpeedModifierJumpFactor() != 1.0f;
+ }
+@@ -53,6 +71,7 @@ static bool ShouldAmplifyJump(Player* player) {
+ static void RegisterSpeedModifiers() {
+     bool speedModifierActive = CVarGetFloat(CVAR_SPEED_MODIFIER_VALUE_NAME, 1.0f) != 1.0f;
+     bool bunnyHoodActive = Ship_GetBunnyHoodMode() != BUNNY_HOOD_VANILLA;
++    bool hpSprintActive = CVarGetInteger(CVAR_HP_SPRINT_NAME, 0) != 0;
+     bool jumpsClamped =
+         Ship_GetBunnyHoodMode() == BUNNY_HOOD_FAST || (CVarGetFloat(CVAR_SPEED_MODIFIER_VALUE_NAME, 1.0f) != 1.0f &&
+                                                        CVarGetInteger(CVAR_SPEED_MODIFIER_JUMP_TOGGLE, 0) == 1);
+@@ -84,12 +103,19 @@ static void RegisterSpeedModifiers() {
+     });
+ 
+     // Ground run speed target, multiplied in place.
+-    COND_VB_SHOULD(VB_PLAYER_MODIFY_RUN_SPEED, speedModifierActive || bunnyHoodActive, {
++    COND_VB_SHOULD(VB_PLAYER_MODIFY_RUN_SPEED, speedModifierActive || bunnyHoodActive || hpSprintActive, {
+         Player* player = va_arg(args, Player*);
+         f32* speedTarget = va_arg(args, f32*);
+         s16* yawTarget = va_arg(args, s16*);
+ 
+-        *speedTarget *= Ship_GetBunnyHoodRunFactor(player) * GetSpeedModifierFactor(true);
++        const f32 hpSprintFactor = HP_GetSprintFactor();
++        *speedTarget *= Ship_GetBunnyHoodRunFactor(player) * GetSpeedModifierFactor(true) * hpSprintFactor;
++
++        // Sprint feedback: small dust puffs at Link's feet while sprinting fast.
++        if ((hpSprintFactor > 1.0f) && (player->linearVelocity > 8.0f) &&
++            CVarGetInteger(CVAR_ENHANCEMENT("HPParticles.Enabled"), 0) && ((gPlayState->gameplayFrames % 3) == 0)) {
++            HP_SpawnFootDust(gPlayState, &player->actor.world.pos, 1);
++        }
+ 
+         func_8083DF68(player, *speedTarget, *yawTarget);
+         func_8083DDC8(player, gPlayState);
+@@ -109,4 +135,5 @@ static void RegisterSpeedModifiers() {
+ }
+ 
+ static RegisterShipInitFunc initFunc(RegisterSpeedModifiers, { "IS_RANDO", CVAR_SPEED_MODIFIER_VALUE_NAME,
+-                                                               CVAR_BUNNY_HOOD_NAME, CVAR_SPEED_MODIFIER_JUMP_TOGGLE });
++                                                               CVAR_BUNNY_HOOD_NAME, CVAR_SPEED_MODIFIER_JUMP_TOGGLE,
++                                                               CVAR_HP_SPRINT_NAME });
+diff --git a/soh/soh/SohGui/SohMenuEnhancements.cpp b/soh/soh/SohGui/SohMenuEnhancements.cpp
+index 759e0605..46709c9a 100644
+--- a/soh/soh/SohGui/SohMenuEnhancements.cpp
++++ b/soh/soh/SohGui/SohMenuEnhancements.cpp
+@@ -338,6 +338,78 @@ void SohMenu::AddMenuEnhancements() {
+         .CVar(CVAR_ENHANCEMENT("ReworkedTargeting.Btn"))
+         .Options(BtnSelectorOptions().Tooltip("Buttons to activate target switching."));
+ 
++    AddWidget(path, "HarkinianPad Extras", WIDGET_SEPARATOR_TEXT);
++    AddWidget(path, "Sprint (Hold Roll)", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("HPSprint.Enabled"))
++        .Options(CheckboxOptions().Tooltip("Like the remake: roll with A and keep holding A to keep running faster."));
++    AddWidget(path, "Sprint Speed: %.2fx", WIDGET_CVAR_SLIDER_FLOAT)
++        .PreFunc([](WidgetInfo& info) {
++            info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("HPSprint.Enabled"), 0) == 0;
++        })
++        .CVar(CVAR_ENHANCEMENT("HPSprint.Speed"))
++        .Options(FloatSliderOptions().Min(1.1f).Max(2.0f).DefaultValue(1.5f).Format("%.2fx"));
++    AddWidget(path, "Roll I-Frames (Dark Souls Dodge)", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("HPRollIFrames.Enabled"))
++        .Options(CheckboxOptions().Tooltip("Dark Souls dodge: a short invincibility window right after the roll starts.\n"
++                                           "Time it right and the attack passes through you (no damage, no knockback).\n"
++                                           "Time it wrong and you get hit. The easy vanilla window at the end of the\n"
++                                           "roll is removed."));
++    AddWidget(path, "Dodge Window: %d frames", WIDGET_CVAR_SLIDER_INT)
++        .PreFunc([](WidgetInfo& info) {
++            info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("HPRollIFrames.Enabled"), 0) == 0;
++        })
++        .CVar(CVAR_ENHANCEMENT("HPRollIFrames.Window"))
++        .Options(IntSliderOptions().Min(3).Max(9).DefaultValue(5).Tooltip(
++            "1 frame = 1/20 s. 5 = 0.25 s (hard). 3 = very hard. 9 = close to Dark Souls' medium roll."));
++    AddWidget(path, "Jump Button", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("HPJump.Enabled"))
++        .Options(CheckboxOptions().Tooltip("Jump whenever you want while standing, walking or running on the ground.\n"
++                                           "Map \"Modifier 2\" in the Input Editor, or pick another button below."));
++    AddWidget(path, "Jump Button Combination:", WIDGET_CVAR_BTN_SELECTOR)
++        .PreFunc([](WidgetInfo& info) {
++            info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("HPJump.Enabled"), 0) == 0;
++        })
++        .CVar(CVAR_ENHANCEMENT("HPJump.Btn"))
++        .Options(BtnSelectorOptions().DefaultValue(BTN_CUSTOM_MODIFIER2).Tooltip("Button that makes Link jump."));
++    AddWidget(path, "Jump Height: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
++        .PreFunc([](WidgetInfo& info) {
++            info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("HPJump.Enabled"), 0) == 0;
++        })
++        .CVar(CVAR_ENHANCEMENT("HPJump.Height"))
++        .Options(FloatSliderOptions().Min(4.0f).Max(9.0f).DefaultValue(6.5f).Format("%.1f").Tooltip(
++            "How high Link jumps. 6.5 is a natural hop."));
++    AddWidget(path, "Better Z-Targeting", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("HPTargeting.Enabled"))
++        .Options(CheckboxOptions().Tooltip("Lock-on catches targets more reliably:\n"
++                                           "- targets in front of the camera count, not only in front of Link\n"
++                                           "- wider angle (about 80 degrees instead of 60)\n"
++                                           "- longer lock-on range and leash"));
++    AddWidget(path, "Lock-On Range: %.2fx", WIDGET_CVAR_SLIDER_FLOAT)
++        .PreFunc([](WidgetInfo& info) {
++            info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("HPTargeting.Enabled"), 0) == 0;
++        })
++        .CVar(CVAR_ENHANCEMENT("HPTargeting.Range"))
++        .Options(FloatSliderOptions().Min(1.0f).Max(1.75f).DefaultValue(1.25f).Format("%.2fx"));
++    AddWidget(path, "Enhanced Lock-On Reticle", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("HPLockOn.Enabled"))
++        .Options(CheckboxOptions().Tooltip("Faster lock-on animation, glowing and pulsing reticle, "
++                                           "floating target arrow."));
++    AddWidget(path, "Better Sword Trail", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("HPSwordTrail.Enabled"))
++        .Options(CheckboxOptions().Tooltip("Longer, fuller sword trail that fades into a light blue edge.\n"
++                                           "Trail colors from the Cosmetics Editor still apply."));
++    AddWidget(path, "Sword Trail Length: %d", WIDGET_CVAR_SLIDER_INT)
++        .PreFunc([](WidgetInfo& info) {
++            info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("HPSwordTrail.Enabled"), 0) == 0;
++        })
++        .CVar(CVAR_ENHANCEMENT("HPSwordTrail.Duration"))
++        .Options(IntSliderOptions().Min(4).Max(12).DefaultValue(7));
++    AddWidget(path, "More Particles", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("HPParticles.Enabled"))
++        .Options(CheckboxOptions().Tooltip("Sparkles when hits land, sparks and smoke on bomb explosions,\n"
++                                           "brighter Navi with a richer sparkle trail, dust when sprinting and jumping,\n"
++                                           "a flash of light on a perfect dodge."));
++
+     AddWidget(path, "Item Count Messages", WIDGET_SEPARATOR_TEXT);
+     AddWidget(path, "Gold Skulltula Tokens", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_ENHANCEMENT("InjectItemCounts.GoldSkulltula"))
+diff --git a/soh/src/code/z_actor.c b/soh/src/code/z_actor.c
+index 77c5abce..39fd1daf 100644
+--- a/soh/src/code/z_actor.c
++++ b/soh/src/code/z_actor.c
+@@ -21,6 +21,24 @@
+ 
+ #include <string.h>
+ #include <stdlib.h>
++
++// HarkinianPad extras: optional lock-on improvements. Every change is off unless its setting is on.
++#define HP_TARGETING_ENABLED() (CVarGetInteger(CVAR_ENHANCEMENT("HPTargeting.Enabled"), 0) != 0)
++#define HP_LOCKON_FX_ENABLED() (CVarGetInteger(CVAR_ENHANCEMENT("HPLockOn.Enabled"), 0) != 0)
++
++static f32 HP_TargetRangeScale(void) {
++    f32 scale;
++
++    if (!HP_TARGETING_ENABLED()) {
++        return 1.0f;
++    }
++    scale = CVarGetFloat(CVAR_ENHANCEMENT("HPTargeting.Range"), 1.25f);
++    return CLAMP(scale, 1.0f, 1.75f);
++}
++
++static u8 HP_Lighten(u8 c, f32 amount) {
++    return (u8)(c + (255 - c) * amount);
++}
+ #include <assert.h>
+ #include <libultraship/bridge/consolevariablebridge.h>
+ 
+@@ -513,17 +531,51 @@ void Attention_Draw(TargetContext* targetCtx, PlayState* play) {
+                         var2 = ((entry->unk_0C - 120.0f) * 0.001f) + 0.15f;
+                     }
+ 
++                    f32 hpPulse = 1.0f;
++
++                    if (HP_LOCKON_FX_ENABLED()) {
++                        f32 hpGlow = 1.45f;
++
++                        if (targetCtx->unk_4B != 0) {
++                            hpPulse = 1.0f + 0.08f * Math_SinS((s16)(play->gameplayFrames * 0x0B00));
++                        }
++
++                        // Soft halo: the same triangles, larger and translucent, drawn first.
++                        Matrix_Translate(entry->pos.x, entry->pos.y, 0.0f, MTXMODE_NEW);
++                        Matrix_Scale(var2 * hpGlow, 0.15f * hpGlow, 1.0f, MTXMODE_APPLY);
++                        gDPSetPrimColor(OVERLAY_DISP++, 0, 0, entry->color.r, entry->color.g, entry->color.b,
++                                        (u8)(spCE * 0.35f));
++                        Matrix_RotateZ((targetCtx->unk_4B & 0x7F) * (M_PI / 64), MTXMODE_APPLY);
++                        for (i = 0; i < 4; i++) {
++                            Matrix_RotateZ(M_PI / 2, MTXMODE_APPLY);
++                            Matrix_Push();
++                            Matrix_Translate(entry->unk_0C * hpPulse / hpGlow, entry->unk_0C * hpPulse / hpGlow, 0.0f,
++                                             MTXMODE_APPLY);
++                            gSPMatrix(OVERLAY_DISP++, MATRIX_NEWMTX(play->state.gfxCtx),
++                                      G_MTX_MODELVIEW | G_MTX_LOAD);
++                            gSPDisplayList(OVERLAY_DISP++, gZTargetLockOnTriangleDL);
++                            Matrix_Pop();
++                        }
++                    }
++
+                     Matrix_Translate(entry->pos.x, entry->pos.y, 0.0f, MTXMODE_NEW);
+                     Matrix_Scale(var2, 0.15f, 1.0f, MTXMODE_APPLY);
+ 
+-                    gDPSetPrimColor(OVERLAY_DISP++, 0, 0, entry->color.r, entry->color.g, entry->color.b, (u8)spCE);
++                    if (HP_LOCKON_FX_ENABLED()) {
++                        gDPSetPrimColor(OVERLAY_DISP++, 0, 0, HP_Lighten(entry->color.r, 0.35f),
++                                        HP_Lighten(entry->color.g, 0.35f), HP_Lighten(entry->color.b, 0.35f),
++                                        (u8)spCE);
++                    } else {
++                        gDPSetPrimColor(OVERLAY_DISP++, 0, 0, entry->color.r, entry->color.g, entry->color.b,
++                                        (u8)spCE);
++                    }
+ 
+                     Matrix_RotateZ((targetCtx->unk_4B & 0x7F) * (M_PI / 64), MTXMODE_APPLY);
+ 
+                     for (i = 0; i < 4; i++) {
+                         Matrix_RotateZ(M_PI / 2, MTXMODE_APPLY);
+                         Matrix_Push();
+-                        Matrix_Translate(entry->unk_0C, entry->unk_0C, 0.0f, MTXMODE_APPLY);
++                        Matrix_Translate(entry->unk_0C * hpPulse, entry->unk_0C * hpPulse, 0.0f, MTXMODE_APPLY);
+                         gSPMatrix(OVERLAY_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_MODELVIEW | G_MTX_LOAD);
+                         gSPDisplayList(OVERLAY_DISP++, gZTargetLockOnTriangleDL);
+                         Matrix_Pop();
+@@ -546,10 +598,20 @@ void Attention_Draw(TargetContext* targetCtx, PlayState* play) {
+ 
+         POLY_XLU_DISP = Gfx_SetupDL(POLY_XLU_DISP, 0x7);
+ 
+-        Matrix_Translate(actor->focus.pos.x, actor->focus.pos.y + (actor->targetArrowOffset * actor->scale.y) + 17.0f,
++        f32 hpArrowBob = 0.0f;
++        f32 hpArrowScale = 1.0f;
++
++        if (HP_LOCKON_FX_ENABLED()) {
++            hpArrowBob = 3.0f * Math_SinS((s16)(play->gameplayFrames * 0x0C00));
++            hpArrowScale = 1.0f + 0.06f * Math_SinS((s16)(play->gameplayFrames * 0x1800));
++        }
++
++        Matrix_Translate(actor->focus.pos.x,
++                         actor->focus.pos.y + (actor->targetArrowOffset * actor->scale.y) + 17.0f + hpArrowBob,
+                          actor->focus.pos.z, MTXMODE_NEW);
+         Matrix_RotateY((f32)((u16)(play->gameplayFrames * 3000)) * (M_PI / 0x8000), MTXMODE_APPLY);
+-        Matrix_Scale((iREG(27) + 35) / 1000.0f, (iREG(28) + 60) / 1000.0f, (iREG(29) + 50) / 1000.0f, MTXMODE_APPLY);
++        Matrix_Scale(hpArrowScale * (iREG(27) + 35) / 1000.0f, hpArrowScale * (iREG(28) + 60) / 1000.0f,
++                     hpArrowScale * (iREG(29) + 50) / 1000.0f, MTXMODE_APPLY);
+ 
+         gDPSetPrimColor(POLY_XLU_DISP++, 0, 0, naviColor->inner.r, naviColor->inner.g, naviColor->inner.b, 255);
+         gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_MODELVIEW | G_MTX_LOAD);
+@@ -647,6 +709,9 @@ void Attention_Update(TargetContext* targetCtx, Player* player, Actor* actorArg,
+         if (targetCtx->unk_4B == 0) {
+             temp5 = (500.0f - targetCtx->unk_44) * 3.0f;
+             temp6 = (temp5 < 30.0f) ? 30.0f : ((100.0f < temp5) ? 100.0f : temp5);
++            if (HP_LOCKON_FX_ENABLED()) {
++                temp6 *= 1.5f;
++            }
+             if (Math_StepToF(&targetCtx->unk_44, 80.0f, temp6) != 0) {
+                 targetCtx->unk_4B++;
+             }
+@@ -1902,6 +1967,20 @@ f32 Attention_WeightedDistToPlayerSq(Actor* actor, Player* player, s16 arg2) {
+         }
+     }
+ 
++    if (HP_TARGETING_ENABLED() && (gPlayState != NULL) && (GET_ACTIVE_CAM(gPlayState) != NULL)) {
++        // Accept actors in front of Link OR in front of the camera, within ~80 degrees,
++        // and prefer the ones closest to straight ahead.
++        s16 camYawTemp = (s16)(actor->yawTowardsPlayer - 0x8000) - Camera_GetCamDirYaw(GET_ACTIVE_CAM(gPlayState));
++        s16 camYawTempAbs = ABS(camYawTemp);
++        s16 bestYawAbs = MIN(yawTempAbs, camYawTempAbs);
++
++        if (bestYawAbs > 0x3800) {
++            return FLT_MAX;
++        }
++
++        return actor->xyzDistToPlayerSq * (1.0f + 0.75f * (bestYawAbs * (1.0f / 0x4000)));
++    }
++
+     if (yawTempAbs > 0x2AAA) {
+         return FLT_MAX;
+     }
+@@ -1924,7 +2003,9 @@ TargetRangeParams D_80115FF8[] = {
+ };
+ 
+ u32 Attention_ActorIsInRange(Actor* actor, f32 arg1) {
+-    return arg1 < D_80115FF8[actor->targetMode].rangeSq;
++    f32 rangeScale = HP_TargetRangeScale();
++
++    return arg1 < D_80115FF8[actor->targetMode].rangeSq * SQ(rangeScale);
+ }
+ 
+ s32 Attention_ShouldReleaseLockOn(Actor* actor, Player* player, s32 flag) {
+@@ -1937,7 +2018,7 @@ s32 Attention_ShouldReleaseLockOn(Actor* actor, Player* player, s32 flag) {
+         s16 abs_var = ABS(var);
+         f32 dist;
+ 
+-        if ((player->focusActor == NULL) && (abs_var > 0x2AAA)) {
++        if ((player->focusActor == NULL) && (abs_var > (HP_TARGETING_ENABLED() ? 0x3800 : 0x2AAA))) {
+             dist = FLT_MAX;
+         } else {
+             dist = actor->xyzDistToPlayerSq;
+diff --git a/soh/src/code/z_collision_check.c b/soh/src/code/z_collision_check.c
+index be81fcca..3d8f1327 100644
+--- a/soh/src/code/z_collision_check.c
++++ b/soh/src/code/z_collision_check.c
+@@ -1671,6 +1671,102 @@ static HitInfo sHitInfo[] = {
+ /**
+  * Handles hitmarks, blood, and sound effects for each AC collision, determined by the AC collider's colType
+  */
++// HarkinianPad extras: extra particles. Off unless "HPParticles.Enabled" is set.
++#define HP_PARTICLES_ENABLED() (CVarGetInteger(CVAR_ENHANCEMENT("HPParticles.Enabled"), 0) != 0)
++
++static void HP_SpawnHitSparkles(PlayState* play, Vec3f* pos) {
++    Color_RGBA8 primColor = { 255, 255, 255, 255 };
++    Color_RGBA8 envColor = { 150, 200, 255, 0 };
++    Vec3f accel = { 0.0f, -0.3f, 0.0f };
++    Vec3f velocity;
++    s32 i;
++
++    for (i = 0; i < 6; i++) {
++        velocity.x = Rand_CenteredFloat(8.0f);
++        velocity.y = 1.0f + Rand_ZeroOne() * 4.0f;
++        velocity.z = Rand_CenteredFloat(8.0f);
++        EffectSsKiraKira_SpawnDispersed(play, pos, &velocity, &accel, &primColor, &envColor, 1200, 10);
++    }
++}
++
++void HP_SpawnFootDust(PlayState* play, Vec3f* pos, s32 count) {
++    Color_RGBA8 dustPrim = { 200, 190, 170, 150 };
++    Color_RGBA8 dustEnv = { 120, 110, 100, 0 };
++    Vec3f accel = { 0.0f, 0.1f, 0.0f };
++    Vec3f velocity;
++    Vec3f spawnPos;
++    s32 i;
++
++    if ((play == NULL) || (pos == NULL)) {
++        return;
++    }
++
++    for (i = 0; i < count; i++) {
++        spawnPos.x = pos->x + Rand_CenteredFloat(12.0f);
++        spawnPos.y = pos->y + 2.0f;
++        spawnPos.z = pos->z + Rand_CenteredFloat(12.0f);
++        velocity.x = Rand_CenteredFloat(2.0f);
++        velocity.y = 0.5f + Rand_ZeroOne() * 0.8f;
++        velocity.z = Rand_CenteredFloat(2.0f);
++        EffectSsDust_Spawn(play, 0, &spawnPos, &velocity, &accel, &dustPrim, &dustEnv, 60, 12, 14, 0);
++    }
++}
++
++void HP_SpawnDodgeSparkles(PlayState* play, Vec3f* pos) {
++    Color_RGBA8 primColor = { 230, 250, 255, 255 };
++    Color_RGBA8 envColor = { 80, 170, 255, 0 };
++    Vec3f accel = { 0.0f, 0.05f, 0.0f };
++    Vec3f velocity;
++    Vec3f spawnPos;
++    s32 i;
++
++    if ((play == NULL) || (pos == NULL)) {
++        return;
++    }
++
++    for (i = 0; i < 5; i++) {
++        spawnPos.x = pos->x + Rand_CenteredFloat(20.0f);
++        spawnPos.y = pos->y + 10.0f + Rand_ZeroOne() * 25.0f;
++        spawnPos.z = pos->z + Rand_CenteredFloat(20.0f);
++        velocity.x = Rand_CenteredFloat(1.5f);
++        velocity.y = 0.3f + Rand_ZeroOne() * 0.7f;
++        velocity.z = Rand_CenteredFloat(1.5f);
++        EffectSsKiraKira_SpawnDispersed(play, &spawnPos, &velocity, &accel, &primColor, &envColor, 900, 12);
++    }
++}
++
++void HP_SpawnExplosionParticles(PlayState* play, Vec3f* pos) {
++    Color_RGBA8 sparkPrim = { 255, 240, 180, 255 };
++    Color_RGBA8 sparkEnv = { 255, 120, 0, 0 };
++    Color_RGBA8 smokePrim = { 170, 170, 170, 200 };
++    Color_RGBA8 smokeEnv = { 90, 90, 90, 0 };
++    Vec3f sparkAccel = { 0.0f, -0.4f, 0.0f };
++    Vec3f smokeAccel = { 0.0f, 0.15f, 0.0f };
++    Vec3f velocity;
++    s16 yaw;
++    s32 i;
++
++    if ((play == NULL) || (pos == NULL) || !HP_PARTICLES_ENABLED()) {
++        return;
++    }
++
++    for (i = 0; i < 10; i++) {
++        yaw = (s16)(i * (0x10000 / 10) + Rand_CenteredFloat(0x800));
++        velocity.x = Math_SinS(yaw) * (5.0f + Rand_ZeroOne() * 4.0f);
++        velocity.y = 3.0f + Rand_ZeroOne() * 5.0f;
++        velocity.z = Math_CosS(yaw) * (5.0f + Rand_ZeroOne() * 4.0f);
++        EffectSsKiraKira_SpawnDispersed(play, pos, &velocity, &sparkAccel, &sparkPrim, &sparkEnv, 2000, 18);
++    }
++
++    for (i = 0; i < 6; i++) {
++        yaw = (s16)(i * (0x10000 / 6) + Rand_CenteredFloat(0x1000));
++        velocity.x = Math_SinS(yaw) * 3.0f;
++        velocity.y = 0.5f + Rand_ZeroOne();
++        velocity.z = Math_CosS(yaw) * 3.0f;
++        EffectSsDust_Spawn(play, 0, pos, &velocity, &smokeAccel, &smokePrim, &smokeEnv, 150, 20, 18, 0);
++    }
++}
++
+ void CollisionCheck_HitEffects(PlayState* play, Collider* at, ColliderInfo* atInfo, Collider* ac, ColliderInfo* acInfo,
+                                Vec3f* hitPos) {
+     if (acInfo->bumperFlags & BUMP_NO_HITMARK) {
+@@ -1679,6 +1775,9 @@ void CollisionCheck_HitEffects(PlayState* play, Collider* at, ColliderInfo* atIn
+     if (!(atInfo->toucherFlags & TOUCH_AT_HITMARK) && atInfo->toucherFlags & TOUCH_DREW_HITMARK) {
+         return;
+     }
++    if (HP_PARTICLES_ENABLED()) {
++        HP_SpawnHitSparkles(play, hitPos);
++    }
+     if (ac->actor != NULL) {
+         sBloodFuncs[sHitInfo[ac->colType].blood](play, ac, hitPos);
+     }
+diff --git a/soh/src/code/z_eff_blure.c b/soh/src/code/z_eff_blure.c
+index 56e59514..e5bd4ffc 100644
+--- a/soh/src/code/z_eff_blure.c
++++ b/soh/src/code/z_eff_blure.c
+@@ -323,6 +323,40 @@ s32 EffectBlure_Update(void* thisx) {
+         }
+     }
+ 
++    // HarkinianPad extras: longer, fuller sword trail that fades into a light blue edge.
++    if ((this->trailType == TRAIL_TYPE_SWORDS) || (this->trailType == TRAIL_TYPE_KOKIRI_SWORD) ||
++        (this->trailType == TRAIL_TYPE_MASTER_SWORD) || (this->trailType == TRAIL_TYPE_BIGGORON_SWORD)) {
++        static u8 hpTrailApplied = 0;
++
++        if (CVarGetInteger(CVAR_ENHANCEMENT("HPSwordTrail.Enabled"), 0)) {
++            if (!CVarGetInteger(CVAR_COSMETIC("Trails.Duration.Changed"), 0)) {
++                this->elemDuration = CLAMP(CVarGetInteger(CVAR_ENHANCEMENT("HPSwordTrail.Duration"), 7), 4, 12);
++            }
++            this->p1StartColor.a = 255;
++            this->p2StartColor.a = 160;
++            this->p1EndColor.a = 0;
++            this->p2EndColor.a = 0;
++            if (!changed) {
++                this->p1EndColor.r = this->p2EndColor.r = 160;
++                this->p1EndColor.g = this->p2EndColor.g = 210;
++                this->p1EndColor.b = this->p2EndColor.b = 255;
++            }
++            hpTrailApplied = 1;
++        } else if (hpTrailApplied) {
++            // Option switched off: put the vanilla sword trail back.
++            hpTrailApplied = 0;
++            if (!CVarGetInteger(CVAR_COSMETIC("Trails.Duration.Changed"), 0)) {
++                this->elemDuration = 4;
++            }
++            this->p2StartColor.a = 64;
++            if (!changed) {
++                this->p1EndColor.r = this->p2EndColor.r = 255;
++                this->p1EndColor.g = this->p2EndColor.g = 255;
++                this->p1EndColor.b = this->p2EndColor.b = 255;
++            }
++        }
++    }
++
+     // Vanilla code from here on
+     if (this == NULL) {
+         return 0;
+diff --git a/soh/src/overlays/actors/ovl_En_Bom/z_en_bom.c b/soh/src/overlays/actors/ovl_En_Bom/z_en_bom.c
+index 2f29f3d0..9ed6deb2 100644
+--- a/soh/src/overlays/actors/ovl_En_Bom/z_en_bom.c
++++ b/soh/src/overlays/actors/ovl_En_Bom/z_en_bom.c
+@@ -11,6 +11,9 @@
+ #include "soh/ShipUtils.h"
+ #include <libultraship/bridge/consolevariablebridge.h>
+ 
++// HarkinianPad extras (z_collision_check.c): extra sparks and smoke when enabled.
++void HP_SpawnExplosionParticles(PlayState* play, Vec3f* pos);
++
+ #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
+ 
+ void EnBom_Init(Actor* thisx, PlayState* play);
+@@ -339,6 +342,7 @@ void EnBom_Update(Actor* thisx, PlayState* play2) {
+             }
+ 
+             EffectSsBomb2_SpawnLayered(play, &effPos, &effVelocity, &bomb2Accel, 100, (thisx->shape.rot.z * 6) + 19);
++            HP_SpawnExplosionParticles(play, &effPos);
+ 
+             effPos.y = thisx->floorHeight;
+             if (thisx->floorHeight > BGCHECK_Y_MIN) {
+diff --git a/soh/src/overlays/actors/ovl_En_Bombf/z_en_bombf.c b/soh/src/overlays/actors/ovl_En_Bombf/z_en_bombf.c
+index 68e58ee0..546c9c95 100644
+--- a/soh/src/overlays/actors/ovl_En_Bombf/z_en_bombf.c
++++ b/soh/src/overlays/actors/ovl_En_Bombf/z_en_bombf.c
+@@ -8,6 +8,9 @@
+ #include "objects/object_bombf/object_bombf.h"
+ #include "overlays/effects/ovl_Effect_Ss_Dead_Sound/z_eff_ss_dead_sound.h"
+ 
++// HarkinianPad extras (z_collision_check.c): extra sparks and smoke when enabled.
++void HP_SpawnExplosionParticles(PlayState* play, Vec3f* pos);
++
+ #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
+ 
+ void EnBombf_Init(Actor* thisx, PlayState* play);
+@@ -414,6 +417,7 @@ void EnBombf_Update(Actor* thisx, PlayState* play) {
+                 }
+ 
+                 EffectSsBomb2_SpawnLayered(play, &effPos, &effVelocity, &bomb2Accel, 100, 19);
++                HP_SpawnExplosionParticles(play, &effPos);
+ 
+                 effPos.y = thisx->floorHeight;
+                 if (thisx->floorHeight > BGCHECK_Y_MIN) {
+diff --git a/soh/src/overlays/actors/ovl_En_Elf/z_en_elf.c b/soh/src/overlays/actors/ovl_En_Elf/z_en_elf.c
+index 0465df2f..df1a96a1 100644
+--- a/soh/src/overlays/actors/ovl_En_Elf/z_en_elf.c
++++ b/soh/src/overlays/actors/ovl_En_Elf/z_en_elf.c
+@@ -815,7 +815,7 @@ void EnElf_UpdateLights(EnElf* this, PlayState* play) {
+     s16 glowLightRadius;
+     Player* player;
+ 
+-    glowLightRadius = 100;
++    glowLightRadius = CVarGetInteger(CVAR_ENHANCEMENT("HPParticles.Enabled"), 0) ? 150 : 100;
+ 
+     if (this->unk_2A8 == 8) {
+         glowLightRadius = 0;
+@@ -1202,6 +1202,15 @@ void EnElf_SpawnSparkles(EnElf* this, PlayState* play, s32 sparkleLife) {
+ 
+     EffectSsKiraKira_SpawnDispersed(play, &sparklePos, &sparkleVelocity, &sparkleAccel, &primColor, &envColor, 1000,
+                                     sparkleLife);
++
++    // HarkinianPad extras: a second, slightly larger sparkle for a richer trail.
++    if (CVarGetInteger(CVAR_ENHANCEMENT("HPParticles.Enabled"), 0)) {
++        sparklePos.x = Rand_CenteredFloat(10.0f) + this->actor.world.pos.x;
++        sparklePos.y = (Rand_ZeroOne() * 10.0f) + this->actor.world.pos.y - 2.0f;
++        sparklePos.z = Rand_CenteredFloat(10.0f) + this->actor.world.pos.z;
++        EffectSsKiraKira_SpawnDispersed(play, &sparklePos, &sparkleVelocity, &sparkleAccel, &primColor, &envColor,
++                                        1300, sparkleLife + 6);
++    }
+ }
+ 
+ void func_80A04D90(EnElf* this, PlayState* play) {
+diff --git a/soh/src/overlays/actors/ovl_player_actor/z_player.c b/soh/src/overlays/actors/ovl_player_actor/z_player.c
+index 6dc2e125..198b71d1 100644
+--- a/soh/src/overlays/actors/ovl_player_actor/z_player.c
++++ b/soh/src/overlays/actors/ovl_player_actor/z_player.c
+@@ -38,6 +38,21 @@
+ #include <assert.h>
+ #include <libultraship/bridge/consolevariablebridge.h>
+ 
++// HarkinianPad extras: effect helpers (z_collision_check.c).
++void HP_SpawnFootDust(PlayState* play, Vec3f* pos, s32 count);
++void HP_SpawnDodgeSparkles(PlayState* play, Vec3f* pos);
++
++// HarkinianPad extras: Dark Souls style dodge. The roll marks the game frames inside its i-frame window;
++// a hit checked on the next frame passes through Link with no damage, knockback or stun.
++static u32 sHPDodgeStamp = 0;
++static u8 sHPDodgeValid = false;
++static u8 sHPDodgeFlashShown = false;
++
++static s32 HP_IsDodging(PlayState* play) {
++    return sHPDodgeValid && CVarGetInteger(CVAR_ENHANCEMENT("HPRollIFrames.Enabled"), 0) &&
++           ((u32)(play->gameplayFrames - sHPDodgeStamp) <= 1);
++}
++
+ // Some player animations are played at this reduced speed, for reasons yet unclear.
+ // This is called "adjusted" for now.
+ #define PLAYER_ANIM_ADJUSTED_SPEED (2.0f / 3.0f)
+@@ -4766,6 +4781,17 @@ s32 func_808382DC(Player* this, PlayState* play) {
+             Player_PlayVoiceSfx(this, NA_SE_VO_LI_TAKEN_AWAY);
+             play->haltAllActors = true;
+             Sfx_PlaySfxCentered(NA_SE_OC_ABYSS);
++        } else if (HP_IsDodging(play) && ((this->knockbackType != PLAYER_KNOCKBACK_NONE) ||
++                                          (this->cylinder.base.acFlags & AC_HIT))) {
++            // HarkinianPad extras: perfect dodge, the attack passes through Link.
++            this->knockbackType = PLAYER_KNOCKBACK_NONE;
++            this->actor.colChkInfo.damage = 0;
++            this->cylinder.base.acFlags &= ~AC_HIT;
++            if (!sHPDodgeFlashShown) { // one flash per roll, but every hit in the window is dodged
++                sHPDodgeFlashShown = true;
++                Player_PlaySfx(this, NA_SE_IT_SWORD_SWING);
++                HP_SpawnDodgeSparkles(play, &this->actor.world.pos);
++            }
+         } else if ((this->knockbackType != PLAYER_KNOCKBACK_NONE) &&
+                    ((this->knockbackType >= PLAYER_KNOCKBACK_LARGE) || (this->invincibilityTimer == 0))) {
+             u8 knockbackResponse[] = {
+@@ -9771,7 +9797,23 @@ void Player_Action_Roll(Player* this, PlayState* play) {
+     ocCollidedActor = NULL;
+     animDone = LinkAnimation_Update(play, &this->skelAnime);
+ 
+-    if (LinkAnimation_OnFrame(&this->skelAnime, 8.0f)) {
++    if (CVarGetInteger(CVAR_ENHANCEMENT("HPRollIFrames.Enabled"), 0)) {
++        // HarkinianPad extras: Dark Souls style i-frames. A short window right after the start of the roll,
++        // measured in game frames (1/20 s), replaces the long vanilla window at the end of the roll.
++        f32 rollSpeed = (this->skelAnime.playSpeed > 0.1f) ? this->skelAnime.playSpeed : 1.0f;
++        f32 gameFrames = this->skelAnime.curFrame / rollSpeed;
++        s32 window = CLAMP(CVarGetInteger(CVAR_ENHANCEMENT("HPRollIFrames.Window"), 5), 3, 9);
++
++        if (gameFrames < 2.0f) {
++            sHPDodgeValid = true;
++            sHPDodgeFlashShown = false;
++        }
++        if ((gameFrames >= 2.0f) && (gameFrames < 2.0f + window)) {
++            sHPDodgeStamp = play->gameplayFrames;
++        } else if (gameFrames >= 2.0f + window) {
++            sHPDodgeStamp = play->gameplayFrames - 100;
++        }
++    } else if (LinkAnimation_OnFrame(&this->skelAnime, 8.0f)) {
+         Player_SetInvulnerability(this, -10);
+     }
+ 
+@@ -16610,3 +16652,69 @@ void Player_StartTalking(PlayState* play, Actor* actor) {
+     F(sHeldItemButtonIsHeldDown)
+ 
+ SHIP_SAVESTATE_DEFINE(Player, PLAYER_SHIP_SAVESTATE_FIELDS)
++
++// HarkinianPad extras: manual jump.
++// Starts the game's own jump action (the one used when running off a ledge), but only from
++// ordinary on-ground movement, so it cannot interrupt attacks, items, climbing, swimming,
++// cutscenes or any other special state.
++s32 Player_HPTryManualJump(PlayState* play, f32 jumpVelocity) {
++    Player* this;
++    LinkAnimationHeader* anim;
++    s16 yawDiff;
++
++    if (play == NULL) {
++        return false;
++    }
++
++    this = GET_PLAYER(play);
++
++    if ((this == NULL) || Player_InCsMode(play) || (this->actor.parent != NULL)) {
++        return false;
++    }
++
++    if (!(this->actor.bgCheckFlags & BGCHECKFLAG_GROUND)) {
++        return false;
++    }
++
++    if (this->stateFlags1 &
++        (PLAYER_STATE1_LOADING | PLAYER_STATE1_INPUT_DISABLED | PLAYER_STATE1_TALKING | PLAYER_STATE1_DEAD |
++         PLAYER_STATE1_READY_TO_FIRE | PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_CARRYING_ACTOR |
++         PLAYER_STATE1_CHARGING_SPIN_ATTACK | PLAYER_STATE1_HANGING_OFF_LEDGE | PLAYER_STATE1_CLIMBING_LEDGE |
++         PLAYER_STATE1_JUMPING | PLAYER_STATE1_FREEFALL | PLAYER_STATE1_FIRST_PERSON | PLAYER_STATE1_CLIMBING_LADDER |
++         PLAYER_STATE1_SHIELDING | PLAYER_STATE1_ON_HORSE | PLAYER_STATE1_DAMAGED | PLAYER_STATE1_IN_WATER |
++         PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE | PLAYER_STATE1_FLOOR_DISABLED)) {
++        return false;
++    }
++
++    if (this->stateFlags2 &
++        (PLAYER_STATE2_CRAWLING | PLAYER_STATE2_PAUSE_MOST_UPDATING | PLAYER_STATE2_OCARINA_PLAYING)) {
++        return false;
++    }
++
++    // Standing, walking, running, turning and Z-target movement only.
++    if ((this->actionFunc != Player_Action_Idle) && (this->actionFunc != Player_Action_80842180) &&
++        (this->actionFunc != Player_Action_TurnInPlace) && (this->actionFunc != Player_Action_80840450) &&
++        (this->actionFunc != Player_Action_808407CC) && (this->actionFunc != Player_Action_80840DE4) &&
++        (this->actionFunc != Player_Action_808414F8) && (this->actionFunc != Player_Action_8084193C) &&
++        (this->actionFunc != Player_Action_8084227C) && (this->actionFunc != Player_Action_808423EC)) {
++        return false;
++    }
++
++    jumpVelocity = CLAMP(jumpVelocity, 3.0f, 10.0f);
++
++    yawDiff = this->yaw - this->actor.shape.rot.y;
++    if ((ABS(yawDiff) < 0x1000) && (this->linearVelocity > 4.0f)) {
++        anim = &gPlayerAnim_link_normal_run_jump;
++    } else {
++        anim = &gPlayerAnim_link_normal_jump;
++    }
++
++    func_80838940(this, anim, jumpVelocity, play, NA_SE_VO_LI_AUTO_JUMP);
++    this->av2.actionVar2 = 1;
++
++    if (CVarGetInteger(CVAR_ENHANCEMENT("HPParticles.Enabled"), 0)) {
++        HP_SpawnFootDust(play, &this->actor.world.pos, 4);
++    }
++
++    return true;
++}
